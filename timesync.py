@@ -19,6 +19,7 @@ class RaspiTimeSync:
     # es sollte nur eine instnz dieser klasse existieren dürfen
 
     # if time is synced, the time DictObj is shorter: {"ts": 0, "synced" 1}
+    # 2do: if synced=0: {"ts": 0, "synced" 1, "boot_uuid": "a1f0....e3d"}.a nd do not save boot_uptime _ts ...
     time = {"ts": 0, "synced": 0, "boot_uuid": "", "boot_uptime": 0, "boot_ts": 0, "sync": {"offset": 0, "uptime": 0}}
     _is_synced = 0
 
