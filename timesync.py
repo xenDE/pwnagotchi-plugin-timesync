@@ -4,6 +4,21 @@ __name__ = 'timesync'
 __license__ = 'GPL3'
 __description__ = 'calculates an offset after the time of the rasperry pi has been syncronized and can then correct times before the time of the syncronization'
 
+"""
+    problem:
+        raspi has no battery buffered clock. on boot its set time to last-file-change of "/var/lib/systemd/timesync/clock"
+        the cron makes every minute a "touch /var/lib/systemd/timesync/clock"
+        so: raspi always starts with time from last shutdown and syncs time, if internet is available (or gps/* time sync)
+    solution:
+        we store on every boot the timestamp+uptime. if timestamp/uptime is different over 60s from saved boot values, we know: time was synced
+        now we can fix times from before sync time by calculating an offset
+    things are possible:
+        - store (on saved handshakes 4example) timestamp if synced or if not synced: {"ts": 1571775435, "boot_uuid": "a1f0....e3d", "uptime": 1234}
+        - sync time from other already synced pwnagotchi
+        - 
+"""
+
+#2do: replace print by logging.debug
 
 import logging
 import os
@@ -12,52 +27,76 @@ import hashlib
 import time
 
 
-class RaspiTimeSync:
+class RaspiSyncedTime:
     """
-    Helpe Class for syncing timestamps
+    Class for synced timestamps
     """
-    # es sollte nur eine instnz dieser klasse existieren dürfen
 
-    # getTime() return: if time is synced: {"ts": 0, "synced" 1}
-    # getTime() return: if not synced: {"ts": 0, "synced" 0, "boot_uuid": "a1f0....e3d"}.a nd do not save boot_uptime _ts ...
-    # time is the all infos from this boot:
-    time = {"ts": 0, "synced": 0, "boot_uuid": "", "boot_uptime": 0, "boot_ts": 0, "sync": {"offset": 0, "uptime": 0}}
+    # getTime() returns NOW:
+    #   int(1571775435)     timestamp, if time is synced
+    #   dict({"ts": 1571775435, "boot_uuid": "a1f0....e3d", "uptime": 1234})      if not synced
+
+    # request a synced timestamp:
+    # getTime( {"ts": 1571775435, "boot_uuid": "a1f0....e3d", "uptime": 1234} )
+    # returns:
+    #   int(1571775435)     timestamp, if time are synced
+    #   dict({"ts": 1571775435, "boot_uuid": "a1f0....e3d", "uptime": 1234})      if not synced
+
+
+    cached_boot_times = {}
+
+    _boot_uuid = ""
     _is_synced = 0
+
+    _check_sync_last_utime = 0
+    _check_sync_interval = 60   # check all 60 seconds for synced time
+    _boot_timesync_json_path = "/var/pwnagotchi/timesync/"  # needs to end with /
 
     def __init__(self):
         try:
-          with open("/var/lib/systemd/random-seed","rb") as f:
-            random_seed_data = f.read()
-          f.close() 
-          self.time["boot_uuid"] = hashlib.md5(random_seed_data).hexdigest();
+            with open("/var/lib/systemd/random-seed", "rb") as f:
+                random_seed_data = f.read()
+            f.close()
+            self._boot_uuid = hashlib.md5(random_seed_data).hexdigest();
         except Exception as error:
-          print("error on reading /var/lib/systemd/random-seed: ", error)
-        json_boot = self._getJsonBootDict(self.time["boot_uuid"])
-        self.time = {**self.time, **json_boot}
-        self._is_synced = self.time["synced"]
+            print("error on reading /var/lib/systemd/random-seed: ", error)
+        self.cached_boot_times[self._boot_uuid] = self._getJsonBootDict(self._boot_uuid)
+        self._is_synced = self.cached_boot_times[self._boot_uuid]["synced"]
         if self._is_synced == 0:
-          self._checkSync()
-        else:
-          self.time = {"ts": 0, "synced": 1}    # make timeDict shorter
+            self._checkSync()
+        # make second check for already synced ad boot time before boot
 
     def getTime(self, intime = None):
-      if intime is None:
-        intime = self.time
-        intime["ts"] = int("%.0f" % time.time())
-        return intime
-      else:
-        if intime["synced"] == 1:
-          return intime
+        if isinstance(intime, int):
+            return intime   # is timestamp
+        elif intime is None:
+            if self._is_synced == 1:
+                print("time(NOW) is already synced")
+                return int("%.0f" % time.time())
+            else:
+                print("time(NOW) is NOT synced")
+                return {"ts": int("%.0f" % time.time()), "boot_uuid": self._boot_uuid, "uptime": self._getUptime()}
+        elif isinstance(intime, dict):
+            print("try to sync given timeDict")
+            return self.getSynced(intime)
         else:
-          return self._checkSync(intime)
+            logging.error("unknown time format")
 
     def _getJsonBootDict(self, boot_uuid):
-        file_name = "/var/local/time-sync/" + boot_uuid + ".json"
+        if boot_uuid != self._boot_uuid:
+            if boot_uuid in self.cached_boot_times:
+                return self.cached_boot_times[boot_uuid]    # if other boot and already in cache
+        if boot_uuid == self._boot_uuid:
+            if boot_uuid in self.cached_boot_times:
+                if self.cached_boot_times[boot_uuid]["synced"] == 1:
+                    return self.cached_boot_times[boot_uuid]    # already synced
+        file_name = self._boot_timesync_json_path + boot_uuid + ".json"
         try:
             with open(file_name, 'r') as json_file:
-                return json.load(json_file)
+                self.cached_boot_times[boot_uuid] = json.load(json_file)
+                return self.cached_boot_times[boot_uuid]
         except json.JSONDecodeError as js_e:
-            raise js_e
+            return None # boot_uuid does not exist or is not readable json
 
     def _getUptime(self):
         with open("/proc/uptime","r") as f:
@@ -65,50 +104,55 @@ class RaspiTimeSync:
         f.close()
         return int("%.0f" % float(uptime.split(' ')[0]))
 
-    def _checkSync(self, intime=None):
-        if intime is None:
-          check_time = self.time
-          if check_time["synced"] == 1:
-            return check_time
-          uptime = self._getUptime()
-          boot_offset = self.time["boot_ts"] - self.time["boot_uptime"]
-          now_ts = int("%.0f" % check_time.time())
-          now_offset = now_ts - uptime
-          offset = now_offset - boot_offset
+    def getSynced(self, timeDict):
+        if isinstance(timeDict, int):
+            return timeDict   # is timestamp, should be correct
+        self._checkSync()   # try to calc offset for this boot
+        check_boot = self._getJsonBootDict(timeDict["boot_uuid"])
+        if check_boot is None:
+            return timeDict # no boot_uuid data - can not proccess
+        if check_boot["synced"] == 0:
+            return timeDict # have no sync for this boot - can not calc offset
+        else:   # sync data / offset is available
+            if timeDict["uptime"] < check_boot["sync"]["uptime"]:
+                # needs sync
+                print("sync time with offset ", check_boot["sync"]["offset"])
+                cleaned_ts = timeDict["ts"] + check_boot["sync"]["offset"]
+                return int(cleaned_ts)
+            else:
+                # needs to be checked for already synced time
+                if check_boot["boot_ts"]-check_boot["boot_uptime"] != timeDict["ts"]-timeDict["uptime"]:
+                    return int(timeDict["ts"] + check_boot["sync"]["offset"])
+
+    def _checkSync(self):
+        if self._is_synced == 1:
+            return  # already synced
+        uptime = self._getUptime()
+        if uptime - self._check_sync_last_utime > self._check_sync_interval:
+            self._check_sync_last_utime = uptime
         else:
-          check_time = intime
-          if check_time["synced"] == 1:
-            return check_time
-          boot_time = self._getJsonBootDict(check_time["boot_uuid"])
-          if boot_time["synced"] == 1:
-            offset = boot_time["sync"]["offset"]
-          else:
-            return check_time
-          uptime = boot_time["boot_uptime"]
-          boot_offset = boot_time["boot_ts"] - self.time["boot_uptime"]
-
-#        print("new offset: " + str(offset))
-
-        # wenn zeit differenz über 60 sekunden
-        if abs(offset) > 60:
-          synced_time = {"ts": check_time + offset, "synced": 1}
-
-        # save calculated offset, if this boot
-        if intime is None:
-          save_time = check_time
-          save_time["synced"] = 1
-          save_time["sync"]["offset"] = offset
-          save_time["sync"]["uptime"] = uptime
-          try:
-            file_name = "/var/local/time-sync/" + save_time["boot_uuid"] + ".json"
-            with open(file_name, 'w+t') as uuid_json_file:
-              json.dump(save_time, uuid_json_file)
-          except OSError as os_e:
-            logging.error("TIME-SYNC: %s", os_e)
-          self.time = save_time
+            return  # not over interval
+        # calc offset
+        boot_time = self._getJsonBootDict(self._boot_uuid)
+        boot_offset = boot_time["boot_ts"] - boot_time["boot_uptime"]
+        now_ts = int("%.0f" % time.time())
+        now_offset = now_ts - uptime
+        offset = now_offset - boot_offset
+        print("calculated offset is: ", offset)
+        if abs(offset) > 10:    # sync diff > 10 seconds
+            boot_time["synced"] = 1
+            boot_time["sync"]["offset"] = offset
+            boot_time["sync"]["uptime"] = uptime
+            try:
+                file_name = self._boot_timesync_json_path + self._boot_uuid + ".json"
+                with open(file_name, 'w+t') as uuid_json_file:
+                    json.dump(boot_time, uuid_json_file)
+            except OSError as os_e:
+                logging.error("TIME-SYNC: %s", os_e)
+            self.cached_boot_times[self._boot_uuid] = boot_time
 
 
-raspi_time_sync = RaspiTimeSync()
+raspi_synced_time = RaspiSyncedTime()
 
-print(raspi_time_sync.getTime())
+print(raspi_synced_time.getTime())
 
