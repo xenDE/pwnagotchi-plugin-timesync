@@ -10,6 +10,12 @@ pts_boot_uptime=$(printf "%.0f" "$(cat /proc/uptime | awk '{ print $1 }')")
 pts_boot_ts=$(date +%s)
 pts_boot_synced=0
 
+timedatectl status | grep "System clock synchronized:" | grep -q "yes"
+if [ "$?" -eq "0" ];
+then
+  pts_boot_synced=1
+fi
+
 mkdir -p /var/pwnagotchi/timesync
 echo -n "{\"boot_uuid\":\"$pts_boot_uuid\",\"boot_uptime\":$pts_boot_uptime,\"boot_ts\":$pts_boot_ts,\"synced\":$pts_boot_synced,\"sync\":{\"offset\":0,\"uptime\":0}}" > /var/pwnagotchi/timesync/$pts_boot_uuid.json
 
