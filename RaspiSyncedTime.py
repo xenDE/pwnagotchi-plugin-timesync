@@ -52,7 +52,9 @@ class RaspiSyncedTime:
     _check_sync_interval = 60   # check all 60 seconds for synced time
     _boot_timesync_json_path = "/var/pwnagotchi/timesync/"  # needs to end with /
 
-    def __init__(self):
+    def __init__(self, boot_timesync_json_path = None):
+        if boot_timesync_json_path is not None:
+            self._boot_timesync_json_path = boot_timesync_json_path
         try:
             with open("/var/lib/systemd/random-seed", "rb") as f:
                 random_seed_data = f.read()
@@ -70,6 +72,9 @@ class RaspiSyncedTime:
         if isinstance(intime, int):
             return intime   # is timestamp
         elif intime is None:
+            if self._is_synced != 1:
+                print("my boot time is not synced")
+                self._checkSync()   # try to calc offset for this boot
             if self._is_synced == 1:
                 print("time(NOW) is already synced")
                 return int("%.0f" % time.time())
@@ -125,7 +130,9 @@ class RaspiSyncedTime:
                     return int(timeDict["ts"] + check_boot["sync"]["offset"])
 
     def _checkSync(self):
+        print("_checkSync() called")
         if self._is_synced == 1:
+            print("_checkSync() canceled: already in sync")
             return  # already synced
         uptime = self._getUptime()
         if uptime - self._check_sync_last_utime > self._check_sync_interval:
@@ -149,10 +156,7 @@ class RaspiSyncedTime:
                     json.dump(boot_time, uuid_json_file)
             except OSError as os_e:
                 logging.error("TIME-SYNC: %s", os_e)
+            print("system time was synced, calculated offset: ", offset)
             self.cached_boot_times[self._boot_uuid] = boot_time
-
-
-raspi_synced_time = RaspiSyncedTime()
-
-print(raspi_synced_time.getTime())
+            self._is_synced = 1
 
